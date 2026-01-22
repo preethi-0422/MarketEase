@@ -5,11 +5,10 @@ import { extractEmailsFromString, extractURLfromString } from '@/lib/utils'
 import { onRealTimeChat } from '../conversation'
 import { clerkClient } from '@clerk/nextjs'
 import { onMailer } from '../mailer'
-import OpenAi from 'openai'
+import { GoogleGenerativeAI } from '@google/generative-ai'
 
-const openai = new OpenAi({
-  apiKey: process.env.OPEN_AI_KEY,
-})
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '')
+
 
 export const onStoreConversations = async (
   id: string,
@@ -205,11 +204,9 @@ export const onAiChatBotAssistant = async (
           author
         )
 
-        const chatCompletion = await openai.chat.completions.create({
-          messages: [
-            {
-              role: 'assistant',
-              content: `
+        const model = genAI.getGenerativeModel({
+          model: 'gemini-flash-latest',
+          systemInstruction: `
               You will get an array of questions that you must ask the customer. 
               
               Progress the conversation using those questions. 
@@ -236,17 +233,26 @@ export const onAiChatBotAssistant = async (
                 checkCustomer?.customer[0].id
               }
           `,
-            },
-            ...chat,
-            {
-              role: 'user',
-              content: message,
-            },
-          ],
-          model: 'gpt-3.5-turbo',
         })
 
-        if (chatCompletion.choices[0].message.content?.includes('(realtime)')) {
+        const chatHistory = chat.map((c) => ({
+          role: c.role === 'assistant' ? 'model' : 'user',
+          parts: [{ text: c.content }],
+        }))
+
+        const chatCompletion = await model.generateContent({
+          contents: [
+            ...chatHistory,
+            {
+              role: 'user',
+              parts: [{ text: message }],
+            },
+          ],
+        })
+
+        const responseText = chatCompletion.response.text()
+
+        if (responseText?.includes('(realtime)')) {
           const realtime = await client.chatRoom.update({
             where: {
               id: checkCustomer?.customer[0].chatRoom[0].id,
@@ -259,10 +265,7 @@ export const onAiChatBotAssistant = async (
           if (realtime) {
             const response = {
               role: 'assistant',
-              content: chatCompletion.choices[0].message.content.replace(
-                '(realtime)',
-                ''
-              ),
+              content: responseText.replace('(realtime)', ''),
             }
 
             await onStoreConversations(
@@ -302,7 +305,7 @@ export const onAiChatBotAssistant = async (
 
         if (chatCompletion) {
           const generatedLink = extractURLfromString(
-            chatCompletion.choices[0].message.content as string
+            responseText as string
           )
 
           if (generatedLink) {
@@ -324,7 +327,7 @@ export const onAiChatBotAssistant = async (
 
           const response = {
             role: 'assistant',
-            content: chatCompletion.choices[0].message.content,
+            content: responseText,
           }
 
           await onStoreConversations(
@@ -337,31 +340,37 @@ export const onAiChatBotAssistant = async (
         }
       }
       console.log('No customer')
-      const chatCompletion = await openai.chat.completions.create({
-        messages: [
-          {
-            role: 'assistant',
-            content: `
+      const model = genAI.getGenerativeModel({
+        model: 'gemini-flash-latest',
+        systemInstruction: `
             You are a highly knowledgeable and experienced sales representative for a ${chatBotDomain.name} that offers a valuable product or service. Your goal is to have a natural, human-like conversation with the customer in order to understand their needs, provide relevant information, and ultimately guide them towards making a purchase or redirect them to a link if they havent provided all relevant information.
             Right now you are talking to a customer for the first time. Start by giving them a warm welcome on behalf of ${chatBotDomain.name} and make them feel welcomed.
 
             Your next task is lead the conversation naturally to get the customers email address. Be respectful and never break character
-
           `,
-          },
-          ...chat,
+      })
+
+      const chatHistory = chat.map((c) => ({
+        role: c.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: c.content }],
+      }))
+
+      const chatCompletion = await model.generateContent({
+        contents: [
+          ...chatHistory,
           {
             role: 'user',
-            content: message,
+            parts: [{ text: message }],
           },
         ],
-        model: 'gpt-3.5-turbo',
       })
+
+      const responseText = chatCompletion.response.text()
 
       if (chatCompletion) {
         const response = {
           role: 'assistant',
-          content: chatCompletion.choices[0].message.content,
+          content: responseText,
         }
 
         return { response }
@@ -369,5 +378,11 @@ export const onAiChatBotAssistant = async (
     }
   } catch (error) {
     console.log(error)
+    return {
+      response: {
+        role: 'assistant',
+        content: "I'm currently experiencing technical difficulties. Please try again later.",
+      },
+    }
   }
 }
